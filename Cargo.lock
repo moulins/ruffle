@@ -3266,7 +3266,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74605f360ce573babfe43964cbe520294dcb081afbf8c108fc6e23036b4da2df"
 dependencies = [
  "profiling-procmacros",
- "tracy-client",
+ "tracy-client 0.14.2",
 ]
 
 [[package]]
@@ -4561,13 +4561,13 @@ dependencies = [
 
 [[package]]
 name = "tracing-tracy"
-version = "0.10.0"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3ebef1f9f0d00aaa29239537effef65b82c56040c680f540fc6cedfac7b230"
+checksum = "55c48ef3e655220d4e43a6be44aa84f078c3004357251cab45f9cc15551a593e"
 dependencies = [
  "tracing-core",
  "tracing-subscriber",
- "tracy-client",
+ "tracy-client 0.15.1",
 ]
 
 [[package]]
@@ -4589,7 +4589,18 @@ checksum = "8b3b9ab635a5b91dd66b7a1591a89f7d52423e6a9143b230bb4c503f41296c0c"
 dependencies = [
  "loom",
  "once_cell",
- "tracy-client-sys",
+ "tracy-client-sys 0.19.0",
+]
+
+[[package]]
+name = "tracy-client"
+version = "0.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e647235d9be24735fa86867c854bc702b71586e637e3af7cfa4300715abdbb"
+dependencies = [
+ "loom",
+ "once_cell",
+ "tracy-client-sys 0.20.0",
 ]
 
 [[package]]
@@ -4597,6 +4608,15 @@ name = "tracy-client-sys"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fcbdba03a3cfc5f757469fd5b6d795fc461484c97e47e94b0fc7db93261d9c5"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "tracy-client-sys"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8cf8aeb20e40d13be65a0b134f8d82d360e72b2793a11de8867d7fbc0f9d6f6"
 dependencies = [
  "cc",
 ]
