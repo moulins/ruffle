@@ -471,64 +471,12 @@ impl<'a, 'gc> UpdateContext<'a, 'gc> {
     /// Please note that you will not be able to use the original update
     /// context until this reborrowed copy has fallen out of scope.
     #[inline]
-    pub fn reborrow<'b>(&'b mut self) -> UpdateContext<'b, 'gc>
+    pub fn reborrow<'b>(&'b mut self) -> &'b mut UpdateContext<'b, 'gc>
     where
         'a: 'b,
     {
-        UpdateContext {
-            action_queue: self.action_queue,
-            gc_context: self.gc_context,
-            interner: self.interner,
-            stub_tracker: self.stub_tracker,
-            library: self.library,
-            player_version: self.player_version,
-            needs_render: self.needs_render,
-            swf: self.swf,
-            audio: self.audio,
-            audio_manager: self.audio_manager,
-            navigator: self.navigator,
-            renderer: self.renderer,
-            log: self.log,
-            ui: self.ui,
-            video: self.video,
-            storage: self.storage,
-            rng: self.rng,
-            stage: self.stage,
-            mouse_over_object: self.mouse_over_object,
-            mouse_down_object: self.mouse_down_object,
-            input: self.input,
-            mouse_position: self.mouse_position,
-            drag_object: self.drag_object,
-            player: self.player.clone(),
-            load_manager: self.load_manager,
-            system: self.system,
-            page_url: self.page_url,
-            instance_counter: self.instance_counter,
-            avm1_shared_objects: self.avm1_shared_objects,
-            avm2_shared_objects: self.avm2_shared_objects,
-            unbound_text_fields: self.unbound_text_fields,
-            timers: self.timers,
-            current_context_menu: self.current_context_menu,
-            avm1: self.avm1,
-            avm2: self.avm2,
-            external_interface: self.external_interface,
-            start_time: self.start_time,
-            update_start: self.update_start,
-            max_execution_duration: self.max_execution_duration,
-            focus_tracker: self.focus_tracker,
-            times_get_time_called: self.times_get_time_called,
-            time_offset: self.time_offset,
-            frame_rate: self.frame_rate,
-            forced_frame_rate: self.forced_frame_rate,
-            actions_since_timeout_check: self.actions_since_timeout_check,
-            frame_phase: self.frame_phase,
-            stream_manager: self.stream_manager,
-            sockets: self.sockets,
-            net_connections: self.net_connections,
-            local_connections: self.local_connections,
-            dynamic_root: self.dynamic_root,
-            post_frame_callbacks: self.post_frame_callbacks,
-        }
+        // SAFETY: lol nope
+        unsafe { core::mem::transmute(self) }
     }
 
     #[inline]
