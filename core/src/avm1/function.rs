@@ -6,13 +6,15 @@ use crate::avm1::object::super_object::SuperObject;
 use crate::avm1::property::Attribute;
 use crate::avm1::scope::Scope;
 use crate::avm1::value::Value;
-use crate::avm1::{ArrayObject, Object, ObjectPtr, ScriptObject, TObject};
+use crate::avm1::{ArrayObject, Object, ScriptObject, TObject};
 use crate::display_object::{DisplayObject, TDisplayObject};
 use crate::string::{AvmString, SwfStrExt as _};
 use crate::tag_utils::SwfSlice;
-use gc_arena::{Collect, Gc, GcCell, Mutation};
+use gc_arena::{Collect, Gc, Mutation};
 use std::{borrow::Cow, fmt, num::NonZeroU8};
 use swf::{avm1::types::FunctionFlags, SwfStr};
+
+use super::NativeObject;
 
 /// Represents a function defined in Ruffle's code.
 ///
@@ -126,10 +128,6 @@ impl<'gc> Avm1Function<'gc> {
 
     pub fn swf_version(&self) -> u8 {
         self.swf_version
-    }
-
-    pub fn data(&self) -> SwfSlice {
-        self.data.clone()
     }
 
     pub fn name(&self) -> Option<AvmString<'gc>> {
@@ -472,12 +470,12 @@ impl<'gc> From<Gc<'gc, Avm1Function<'gc>>> for Executable<'gc> {
 /// Represents an `Object` that holds executable code.
 #[derive(Clone, Collect, Copy)]
 #[collect(no_drop)]
-pub struct FunctionObject<'gc>(GcCell<'gc, FunctionObjectData<'gc>>);
+pub struct FunctionObject<'gc>(Gc<'gc, FunctionObjectData<'gc>>);
 
 impl fmt::Debug for FunctionObject<'_> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("FunctionObject")
-            .field("ptr", &self.0.as_ptr())
+            .field("ptr", &Gc::as_ptr(self.0))
             .finish()
     }
 }
@@ -485,8 +483,6 @@ impl fmt::Debug for FunctionObject<'_> {
 #[derive(Clone, Collect)]
 #[collect(no_drop)]
 struct FunctionObjectData<'gc> {
-    /// The script object base.
-    base: ScriptObject<'gc>,
     /// The code that will be invoked when this object is called.
     function: Option<Executable<'gc>>,
     /// The code that will be invoked when this object is constructed.
@@ -496,19 +492,21 @@ struct FunctionObjectData<'gc> {
 impl<'gc> FunctionObject<'gc> {
     /// Construct a function sans prototype.
     pub fn bare_function(
-        gc_context: &Mutation<'gc>,
+        mc: &Mutation<'gc>,
         function: Option<Executable<'gc>>,
         constructor: Option<Executable<'gc>>,
         fn_proto: Object<'gc>,
-    ) -> Self {
-        Self(GcCell::new(
-            gc_context,
+    ) -> Object<'gc> {
+        let func = FunctionObject(Gc::new(
+            mc,
             FunctionObjectData {
-                base: ScriptObject::new(gc_context, Some(fn_proto)),
                 function,
                 constructor,
             },
-        ))
+        ));
+        let obj = ScriptObject::new(mc, Some(fn_proto));
+        obj.set_native(mc, NativeObject::Function(func));
+        obj.into()
     }
 
     /// Construct a function with any combination of regular and constructor parts.
@@ -526,7 +524,7 @@ impl<'gc> FunctionObject<'gc> {
         fn_proto: Object<'gc>,
         prototype: Object<'gc>,
     ) -> Object<'gc> {
-        let function = Self::bare_function(gc_context, function, constructor, fn_proto).into();
+        let function = Self::bare_function(gc_context, function, constructor, fn_proto);
 
         prototype.define_value(
             gc_context,
@@ -570,155 +568,24 @@ impl<'gc> FunctionObject<'gc> {
             prototype,
         )
     }
-}
 
-impl<'gc> TObject<'gc> for FunctionObject<'gc> {
-    fn raw_script_object(&self) -> ScriptObject<'gc> {
-        self.0.read().base
+    /// Returns the executable for 'standard' function calls.
+    pub fn as_function(&self) -> Option<Executable<'gc>> {
+        self.0.function.clone()
     }
 
-    fn call(
-        &self,
-        name: AvmString<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-        this: Value<'gc>,
-        args: &[Value<'gc>],
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        match self.as_executable() {
-            Some(exec) => exec.exec(
-                ExecutionName::Dynamic(name),
-                activation,
-                this,
-                0,
-                args,
-                ExecutionReason::FunctionCall,
-                (*self).into(),
-            ),
-            None => Ok(Value::Undefined),
-        }
-    }
-
-    fn construct_on_existing(
-        &self,
-        activation: &mut Activation<'_, 'gc>,
-        this: Object<'gc>,
-        args: &[Value<'gc>],
-    ) -> Result<(), Error<'gc>> {
-        this.define_value(
-            activation.context.gc_context,
-            "__constructor__",
-            (*self).into(),
-            Attribute::DONT_ENUM,
-        );
-        if activation.swf_version() < 7 {
-            this.define_value(
-                activation.context.gc_context,
-                "constructor",
-                (*self).into(),
-                Attribute::DONT_ENUM,
-            );
-        }
-        // TODO: de-duplicate code.
-        if let Some(exec) = &self.0.read().constructor {
-            let _ = exec.exec(
-                ExecutionName::Static("[ctor]"),
-                activation,
-                this.into(),
-                1,
-                args,
-                ExecutionReason::FunctionCall,
-                (*self).into(),
-            )?;
-        } else if let Some(exec) = &self.0.read().function {
-            let _ = exec.exec(
-                ExecutionName::Static("[ctor]"),
-                activation,
-                this.into(),
-                1,
-                args,
-                ExecutionReason::FunctionCall,
-                (*self).into(),
-            )?;
-        }
-        Ok(())
-    }
-
-    fn construct(
-        &self,
-        activation: &mut Activation<'_, 'gc>,
-        args: &[Value<'gc>],
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        let prototype = self
-            .get("prototype", activation)?
-            .coerce_to_object(activation);
-        let this = prototype.create_bare_object(activation, prototype)?;
-
-        this.define_value(
-            activation.context.gc_context,
-            "__constructor__",
-            (*self).into(),
-            Attribute::DONT_ENUM,
-        );
-        if activation.swf_version() < 7 {
-            this.define_value(
-                activation.context.gc_context,
-                "constructor",
-                (*self).into(),
-                Attribute::DONT_ENUM,
-            );
-        }
-        // TODO: de-duplicate code.
-        if let Some(exec) = &self.0.read().constructor {
-            // Native constructors will return the constructed `this`.
+    /// Returns the executable for constructor calls.
+    /// The extra `bool` indicates if the executable returns the constructed object.
+    pub fn as_constructor(&self) -> Option<(Executable<'gc>, bool)> {
+        if let Some(exec) = &self.0.function {
+            Some((exec.clone(), false))
+        } else if let Some(exec) = &self.0.constructor {
+            // Native constructors always return the constructed `this`.
             // This allows for `new Object` etc. returning different types.
-            let this = exec.exec(
-                ExecutionName::Static("[ctor]"),
-                activation,
-                this.into(),
-                1,
-                args,
-                ExecutionReason::FunctionCall,
-                (*self).into(),
-            )?;
-            Ok(this)
-        } else if let Some(exec) = &self.0.read().function {
-            let _ = exec.exec(
-                ExecutionName::Static("[ctor]"),
-                activation,
-                this.into(),
-                1,
-                args,
-                ExecutionReason::FunctionCall,
-                (*self).into(),
-            )?;
-            Ok(this.into())
+            Some((exec.clone(), true))
         } else {
-            Ok(Value::Undefined)
+            None
         }
-    }
-
-    fn create_bare_object(
-        &self,
-        activation: &mut Activation<'_, 'gc>,
-        prototype: Object<'gc>,
-    ) -> Result<Object<'gc>, Error<'gc>> {
-        Ok(FunctionObject(GcCell::new(
-            activation.context.gc_context,
-            FunctionObjectData {
-                base: ScriptObject::new(activation.context.gc_context, Some(prototype)),
-                function: None,
-                constructor: None,
-            },
-        ))
-        .into())
-    }
-
-    fn as_executable(&self) -> Option<Executable<'gc>> {
-        self.0.read().function.clone()
-    }
-
-    fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.read().base.as_ptr()
     }
 }
 

@@ -4,7 +4,7 @@ use crate::avm1::function::{ExecutionName, ExecutionReason};
 use crate::avm1::object::NativeObject;
 use crate::avm1::property::{Attribute, Property};
 use crate::avm1::property_map::{Entry, PropertyMap};
-use crate::avm1::{Object, ObjectPtr, TObject, Value};
+use crate::avm1::{Executable, Object, ObjectPtr, TObject, Value};
 use crate::string::AvmString;
 use core::fmt;
 use gc_arena::{Collect, GcCell, Mutation};
@@ -209,19 +209,112 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
         Ok(())
     }
 
-    /// Call the underlying object.
-    ///
-    /// This function takes a redundant `this` parameter which should be
-    /// the object's own `GcCell`, so that it can pass it to user-defined
-    /// overrides that may need to interact with the underlying object.
     fn call(
         &self,
-        _name: AvmString<'gc>,
-        _activation: &mut Activation<'_, 'gc>,
-        _this: Value<'gc>,
-        _args: &[Value<'gc>],
+        name: AvmString<'gc>,
+        activation: &mut Activation<'_, 'gc>,
+        this: Value<'gc>,
+        args: &[Value<'gc>],
     ) -> Result<Value<'gc>, Error<'gc>> {
-        Ok(Value::Undefined)
+        if let Some(exec) = self.as_executable() {
+            exec.exec(
+                ExecutionName::Dynamic(name),
+                activation,
+                this,
+                0,
+                args,
+                ExecutionReason::FunctionCall,
+                (*self).into(),
+            )
+        } else {
+            Ok(Value::Undefined)
+        }
+    }
+
+    fn construct_on_existing(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        this: Object<'gc>,
+        args: &[Value<'gc>],
+    ) -> Result<(), Error<'gc>> {
+        // TODO: de-duplicate code.
+        let NativeObject::Function(func) = self.native() else {
+            return Ok(());
+        };
+
+        this.define_value(
+            activation.gc(),
+            "__constructor__",
+            (*self).into(),
+            Attribute::DONT_ENUM,
+        );
+        if activation.swf_version() < 7 {
+            this.define_value(
+                activation.gc(),
+                "constructor",
+                (*self).into(),
+                Attribute::DONT_ENUM,
+            );
+        }
+
+        if let Some((exec, _)) = func.as_constructor() {
+            let _ = exec.exec(
+                ExecutionName::Static("[ctor]"),
+                activation,
+                this.into(),
+                1,
+                args,
+                ExecutionReason::FunctionCall,
+                (*self).into(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn construct(
+        &self,
+        activation: &mut Activation<'_, 'gc>,
+        args: &[Value<'gc>],
+    ) -> Result<Value<'gc>, Error<'gc>> {
+        // TODO: de-duplicate code.
+        let NativeObject::Function(func) = self.native() else {
+            return Ok(Value::Undefined);
+        };
+
+        let prototype = self
+            .get("prototype", activation)?
+            .coerce_to_object(activation);
+        let this = prototype.create_bare_object(activation, prototype)?;
+
+        this.define_value(
+            activation.context.gc_context,
+            "__constructor__",
+            (*self).into(),
+            Attribute::DONT_ENUM,
+        );
+        if activation.swf_version() < 7 {
+            this.define_value(
+                activation.context.gc_context,
+                "constructor",
+                (*self).into(),
+                Attribute::DONT_ENUM,
+            );
+        }
+
+        if let Some((exec, has_result)) = func.as_constructor() {
+            let result = exec.exec(
+                ExecutionName::Static("[ctor]"),
+                activation,
+                this.into(),
+                1,
+                args,
+                ExecutionReason::FunctionCall,
+                (*self).into(),
+            )?;
+            Ok(if has_result { result } else { (*self).into() })
+        } else {
+            Ok(Value::Undefined)
+        }
     }
 
     fn getter(
@@ -498,10 +591,6 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
         self.0.write(gc_context).native = native;
     }
 
-    fn as_ptr(&self) -> *const ObjectPtr {
-        self.0.as_ptr() as *const ObjectPtr
-    }
-
     fn length(&self, activation: &mut Activation<'_, 'gc>) -> Result<i32, Error<'gc>> {
         self.get_data("length".into(), activation)
             .coerce_to_i32(activation)
@@ -538,6 +627,18 @@ impl<'gc> TObject<'gc> for ScriptObject<'gc> {
     fn delete_element(&self, activation: &mut Activation<'_, 'gc>, index: i32) -> bool {
         let index_str = AvmString::new_utf8(activation.context.gc_context, index.to_string());
         self.delete(activation, index_str)
+    }
+
+    fn as_ptr(&self) -> *const ObjectPtr {
+        self.0.as_ptr() as *const ObjectPtr
+    }
+
+    fn as_executable(&self) -> Option<Executable<'gc>> {
+        if let NativeObject::Function(func) = self.native() {
+            func.as_function()
+        } else {
+            None
+        }
     }
 }
 

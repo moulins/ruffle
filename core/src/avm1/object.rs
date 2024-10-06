@@ -47,6 +47,7 @@ pub enum NativeObject<'gc> {
     ///
     /// It is a logic error for a boxed value to be a `Value::Object`.
     Value(Gc<'gc, Value<'gc>>),
+    Function(FunctionObject<'gc>),
     Date(Gc<'gc, Cell<Date>>),
     BlurFilter(BlurFilter<'gc>),
     BevelFilter(BevelFilter<'gc>),
@@ -83,7 +84,6 @@ pub enum NativeObject<'gc> {
         ArrayObject(ArrayObject<'gc>),
         StageObject(StageObject<'gc>),
         SuperObject(SuperObject<'gc>),
-        FunctionObject(FunctionObject<'gc>),
     }
 )]
 pub trait TObject<'gc>: 'gc + Collect + Into<Object<'gc>> + Clone + Copy {
