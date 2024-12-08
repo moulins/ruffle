@@ -1,4 +1,4 @@
-use gc_arena::{Collect, DynamicRoot, Rootable};
+use gc_arena::{Collect, DynamicRoot, Gc, Rootable};
 use ruffle_render::filters::{
     DisplacementMapFilter, DisplacementMapFilterMode, Filter, ShaderFilter, ShaderObject,
 };
@@ -814,7 +814,7 @@ fn avm2_to_shader_filter<'gc>(
     let dyn_root = activation
         .context
         .dynamic_root
-        .stash(activation.context.gc_context, shader_obj);
+        .stash(activation.gc(), Gc::new(activation.gc(), shader_obj));
 
     let (shader_handle, shader_args) = get_shader_args(shader_obj, activation)?;
 

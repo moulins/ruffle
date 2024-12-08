@@ -307,10 +307,11 @@ impl Default for Timers<'_> {
     }
 }
 
-unsafe impl Collect for Timers<'_> {
-    fn trace(&self, cc: &gc_arena::Collection) {
+// TODO(moulins): gc_arena should provide impl Collect for BinaryHeap.
+unsafe impl<'gc> Collect<'gc> for Timers<'gc> {
+    fn trace<C: gc_arena::collect::Trace<'gc>>(&self, cc: &mut C) {
         for timer in &self.timers {
-            timer.trace(cc);
+            cc.trace(timer);
         }
     }
 }
