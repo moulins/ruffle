@@ -135,7 +135,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(blur_filter_method!(0), None, super_proto);
+    let class = context.builtin_class(blur_filter_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -154,7 +154,7 @@ fn method<'gc>(
     const GET_QUALITY: u8 = 5;
     const SET_QUALITY: u8 = 6;
 
-    if index == CONSTRUCTOR {
+    if index == CONSTRUCTOR && activation.consume_native_constructor_flag() {
         let blur_filter = BlurFilter::new(activation, args)?;
         this.set_native(activation.gc(), NativeObject::BlurFilter(blur_filter));
         return Ok(this.into());

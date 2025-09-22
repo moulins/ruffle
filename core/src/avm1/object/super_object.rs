@@ -83,13 +83,13 @@ impl<'gc> SuperObject<'gc> {
             return Ok(Value::Undefined);
         };
 
-        constr.exec_constructor(
+        constr.exec(
             name.into(),
             activation,
             self.this().into(),
             self.depth() + 1,
             args,
-            ExecutionReason::FunctionCall,
+            ExecutionReason::ConstructorCall,
             constructor,
         )
     }

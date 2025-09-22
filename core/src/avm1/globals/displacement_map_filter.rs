@@ -306,7 +306,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(displacement_map_filter_method!(0), None, super_proto);
+    let class = context.builtin_class(displacement_map_filter_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -337,7 +337,7 @@ fn method<'gc>(
     const GET_ALPHA: u8 = 17;
     const SET_ALPHA: u8 = 18;
 
-    if index == CONSTRUCTOR {
+    if index == CONSTRUCTOR && activation.consume_native_constructor_flag() {
         let displacement_map_filter = DisplacementMapFilter::new(activation, args)?;
         this.set_native(
             activation.gc(),

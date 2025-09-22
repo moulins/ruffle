@@ -16,38 +16,36 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, Some(function), super_proto);
+    let class = context.builtin_class(constructor, super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
 
-/// `Boolean` constructor
-pub fn constructor<'gc>(
+pub fn populate_this<'gc>(activation: &mut Activation<'_, 'gc>, this: Object<'gc>, value: bool) {
+    this.set_native(activation.gc(), NativeObject::Bool(value));
+}
+
+/// Implements `Boolean` constructor and function
+fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let is_constructor = activation.consume_native_constructor_flag();
+
     let value = args
         .get(0)
-        .is_some_and(|value| value.as_bool(activation.swf_version()));
-    // Called from a constructor, populate `this`.
-    this.set_native(activation.gc(), NativeObject::Bool(value));
+        .map(|value| value.as_bool(activation.swf_version()));
 
-    Ok(this.into())
-}
-
-/// `Boolean` function
-fn function<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    // If called as a function, return the value.
-    // Boolean() with no argument returns undefined.
-    Ok(args
-        .get(0)
-        .map(|value| value.as_bool(activation.swf_version()))
-        .map_or(Value::Undefined, Value::Bool))
+    if is_constructor {
+        // Called from a constructor, populate `this`.
+        populate_this(activation, this, value.unwrap_or(false));
+        Ok(this.into())
+    } else {
+        // If Boolean is called as a function, return the value.
+        // Boolean() with no argument returns undefined.
+        Ok(value.map(Value::from).unwrap_or(Value::Undefined))
+    }
 }
 
 pub fn to_string<'gc>(

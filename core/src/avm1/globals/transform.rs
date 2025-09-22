@@ -53,7 +53,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(transform_method!(0), None, super_proto);
+    let class = context.builtin_class(transform_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -74,6 +74,9 @@ fn method<'gc>(
     const GET_PIXEL_BOUNDS: u8 = 109;
 
     if index == CONSTRUCTOR {
+        if !activation.consume_native_constructor_flag() {
+            return Ok(Value::Undefined);
+        }
         let Some(transform) = TransformObject::new(activation, args) else {
             return Ok(Value::Undefined);
         };

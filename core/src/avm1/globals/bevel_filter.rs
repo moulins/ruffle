@@ -407,7 +407,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(bevel_filter_method!(0), None, super_proto);
+    let class = context.builtin_class(bevel_filter_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -444,7 +444,7 @@ fn method<'gc>(
     const GET_TYPE: u8 = 23;
     const SET_TYPE: u8 = 24;
 
-    if index == CONSTRUCTOR {
+    if index == CONSTRUCTOR && activation.consume_native_constructor_flag() {
         let bevel_filter = BevelFilter::new(activation, args)?;
         this.set_native(activation.gc(), NativeObject::BevelFilter(bevel_filter));
         return Ok(this.into());

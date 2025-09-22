@@ -480,12 +480,12 @@ impl<'gc> Value<'gc> {
 
         let obj = Object::new(&activation.context.strings, proto);
 
-        // Constructor populates the boxed object with the value.
+        // Populate the boxed object with the value.
         use crate::avm1::globals;
         match value {
-            Value::Bool(_) => drop(globals::boolean::constructor(activation, obj, &[value])),
-            Value::Number(_) => drop(globals::number::constructor(activation, obj, &[value])),
-            Value::String(_) => drop(globals::string::constructor(activation, obj, &[value])),
+            Value::Bool(v) => globals::boolean::populate_this(activation, obj, v),
+            Value::Number(v) => globals::number::populate_this(activation, obj, v),
+            Value::String(v) => globals::string::populate_this(activation, obj, v),
             _ => (),
         }
 

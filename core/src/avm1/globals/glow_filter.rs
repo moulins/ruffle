@@ -260,7 +260,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(glow_filter_method!(0), None, super_proto);
+    let class = context.builtin_class(glow_filter_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -289,7 +289,7 @@ fn method<'gc>(
     const GET_STRENGTH: u8 = 15;
     const SET_STRENGTH: u8 = 16;
 
-    if index == CONSTRUCTOR {
+    if index == CONSTRUCTOR && activation.consume_native_constructor_flag() {
         let glow_filter = GlowFilter::new(activation, args)?;
         this.set_native(activation.gc(), NativeObject::GlowFilter(glow_filter));
         return Ok(this.into());

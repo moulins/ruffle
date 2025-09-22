@@ -18,30 +18,23 @@ const PROTO_DECLS: &[Declaration] = declare_properties! {
 /// not allocate an object to store either proto. Instead, they must be provided
 /// through the `DeclContext`.
 pub fn create_class<'gc>(context: &mut DeclContext<'_, 'gc>) -> SystemClass<'gc> {
-    let class = context.native_class_with_proto(constructor, Some(function), context.fn_proto);
+    let class = context.builtin_class_with_proto(constructor, context.fn_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
 
-/// Implements `new Function()`
+/// Implements `Function` constructor and function
 fn constructor<'gc>(
-    _activation: &mut Activation<'_, 'gc>,
+    activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(args.get(0).copied().unwrap_or_else(|| this.into()))
-}
-
-/// Implements `Function()`
-fn function<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(args.get(0).copied().unwrap_or_else(|| {
+    if !activation.consume_native_constructor_flag() && args.is_empty() {
         // Calling `Function()` seems to give a prototypeless bare object.
-        Object::new(&activation.context.strings, None).into()
-    }))
+        Ok(Object::new(&activation.context.strings, None).into())
+    } else {
+        Ok(args.get(0).copied().unwrap_or_else(|| this.into()))
+    }
 }
 
 /// Implements `Function.prototype.call`

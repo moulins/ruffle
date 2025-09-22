@@ -30,36 +30,24 @@ const OBJECT_DECLS: &[Declaration] = declare_properties! {
 /// not allocate an object to store either proto. Instead, they must be provided
 /// through the `DeclContext`.
 pub fn create_class<'gc>(context: &mut DeclContext<'_, 'gc>) -> SystemClass<'gc> {
-    let class = context.native_class_with_proto(constructor, Some(function), context.object_proto);
+    let class = context.builtin_class_with_proto(constructor, context.object_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     context.define_properties_on(class.constr, OBJECT_DECLS);
     class
 }
 
-/// Implements `Object` constructor
+/// Implements `Object` constructor and function
 fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let is_constructor = activation.consume_native_constructor_flag();
     let this = match args.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => this,
+        Value::Undefined | Value::Null if is_constructor => this,
         val => val.coerce_to_object(activation),
     };
     Ok(this.into())
-}
-
-/// Implements `Object` function
-fn function<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    let obj = match args.get(0).unwrap_or(&Value::Undefined) {
-        Value::Undefined | Value::Null => Object::new(&activation.context.strings, None),
-        val => val.coerce_to_object(activation),
-    };
-    Ok(obj.into())
 }
 
 /// Implements `Object.prototype.addProperty`

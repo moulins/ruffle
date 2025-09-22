@@ -33,25 +33,17 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, Some(function), super_proto);
+    let class = context.builtin_class(constructor, super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     context.define_properties_on(class.constr, OBJECT_DECLS);
     class
 }
 
-/// `String` constructor
-pub fn constructor<'gc>(
+pub fn populate_this<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    let value = match args.get(0).cloned() {
-        Some(Value::String(s)) => s,
-        Some(v) => v.coerce_to_string(activation)?,
-        None => istr!(""),
-    };
-
-    // Called from a constructor, populate `this`.
+    value: AvmString<'gc>,
+) {
     this.set_native(activation.gc(), NativeObject::String(value));
 
     // The `length` property lives on the object itself, not its prototype.
@@ -61,23 +53,30 @@ pub fn constructor<'gc>(
         value.len().into(),
         Attribute::DONT_ENUM | Attribute::DONT_DELETE,
     );
-
-    Ok(this.into())
 }
 
-/// `String` function
-fn function<'gc>(
+/// Implements `String` constructor and function
+fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
+    this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let is_constructor = activation.consume_native_constructor_flag();
+
     let value = match args.get(0).cloned() {
         Some(Value::String(s)) => s,
         Some(v) => v.coerce_to_string(activation)?,
         None => istr!(""),
     };
 
-    Ok(value.into())
+    if is_constructor {
+        // Called from a constructor, populate `this`.
+        populate_this(activation, this, value);
+        Ok(this.into())
+    } else {
+        // If String is called as a function, return the value.
+        Ok(value.into())
+    }
 }
 
 fn char_at<'gc>(

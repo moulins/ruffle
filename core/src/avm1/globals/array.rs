@@ -66,7 +66,7 @@ pub fn create_class<'gc>(
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
     let proto = ArrayBuilder::new_with_proto(context.strings, super_proto).with([]);
-    let class = context.native_class_with_proto(constructor, Some(array), proto);
+    let class = context.builtin_class_with_proto(constructor, proto);
     context.define_properties_on(proto, PROTO_DECLS);
 
     // TODO: These were added in Flash Player 7, but are available even to SWFv6 and lower
@@ -83,7 +83,7 @@ pub struct ArrayBuilder<'gc> {
     mc: &'gc Mutation<'gc>,
     length_prop: AvmString<'gc>,
     proto_prop: AvmString<'gc>,
-    proto: Object<'gc>,
+    proto: Option<Object<'gc>>,
 }
 
 impl<'gc> ArrayBuilder<'gc> {
@@ -101,11 +101,20 @@ impl<'gc> ArrayBuilder<'gc> {
             mc: context.gc(),
             length_prop: istr!(context, "length"),
             proto_prop: istr!(context, "__proto__"),
-            proto,
+            proto: Some(proto),
         }
     }
 
     fn init_with(self, this: Object<'gc>, elements: impl IntoIterator<Item = Value<'gc>>) {
+        if let Some(proto) = self.proto {
+            this.define_value(
+                self.mc,
+                self.proto_prop,
+                proto.into(),
+                Attribute::DONT_ENUM | Attribute::DONT_DELETE,
+            );
+        }
+
         let mut length: i32 = 0;
         for value in elements.into_iter() {
             let length_str = AvmString::new_utf8(self.mc, length.to_string());
@@ -124,25 +133,27 @@ impl<'gc> ArrayBuilder<'gc> {
 
     pub fn with(self, elements: impl IntoIterator<Item = Value<'gc>>) -> Object<'gc> {
         let obj = Object::new_without_proto(self.mc);
-        obj.define_value(
-            self.mc,
-            self.proto_prop,
-            self.proto.into(),
-            Attribute::DONT_ENUM | Attribute::DONT_DELETE,
-        );
-
         self.init_with(obj, elements);
         obj
     }
 }
 
-/// Implements `Array` constructor
+/// Implements `Array` constructor and function
 fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
-    this: Object<'gc>,
+    mut this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
-    let builder = ArrayBuilder::new(activation);
+    let mut builder = ArrayBuilder::new(activation);
+
+    if activation.consume_native_constructor_flag() {
+        // Use the existing `this.__proto__` when called as a constructor.
+        builder.proto = None;
+    } else {
+        // If called as a function, `Array()` returns a fresh object.
+        this = Object::new_without_proto(activation.gc());
+    }
+
     if let [Value::Number(length)] = *args {
         builder.init_with(this, []);
         this.set_length(activation, length.clamp_to_i32())?;
@@ -151,23 +162,6 @@ fn constructor<'gc>(
     }
 
     Ok(this.into())
-}
-
-/// Implements `Array` function
-pub fn array<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    if let [Value::Number(length)] = *args {
-        let array = ArrayBuilder::empty(activation);
-        array.set_length(activation, length.clamp_to_i32())?;
-        Ok(array.into())
-    } else {
-        Ok(ArrayBuilder::new(activation)
-            .with(args.iter().cloned())
-            .into())
-    }
 }
 
 pub fn push<'gc>(

@@ -121,7 +121,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(color_matrix_filter_method!(0), None, super_proto);
+    let class = context.builtin_class(color_matrix_filter_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -136,7 +136,7 @@ fn method<'gc>(
     const GET_MATRIX: u8 = 1;
     const SET_MATRIX: u8 = 2;
 
-    if index == CONSTRUCTOR {
+    if index == CONSTRUCTOR && activation.consume_native_constructor_flag() {
         let color_matrix_filter = ColorMatrixFilter::new(activation, args)?;
         this.set_native(
             activation.gc(),

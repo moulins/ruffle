@@ -29,45 +29,39 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, Some(function), super_proto);
+    let class = context.builtin_class(constructor, super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     context.define_properties_on(class.constr, OBJECT_DECLS);
     class
 }
 
-/// `Number` constructor
-pub fn constructor<'gc>(
+pub fn populate_this<'gc>(activation: &mut Activation<'_, 'gc>, this: Object<'gc>, value: f64) {
+    let value = BoxedF64::new(activation.gc(), value);
+    this.set_native(activation.gc(), NativeObject::Number(value));
+}
+
+/// Implements `Number` constructor and function
+fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    let is_constructor = activation.consume_native_constructor_flag();
+
     let value = if let Some(val) = args.get(0) {
         val.coerce_to_f64(activation)?
     } else {
         0.0
     };
 
-    // Called from a constructor, populate `this`.
-    let value = BoxedF64::new(activation.gc(), value);
-    this.set_native(activation.gc(), NativeObject::Number(value));
-
-    Ok(this.into())
-}
-
-/// `Number` function
-fn function<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    let value = if let Some(val) = args.get(0) {
-        val.coerce_to_f64(activation)?
+    if is_constructor {
+        // Called from a constructor, populate `this`.
+        populate_this(activation, this, value);
+        Ok(this.into())
     } else {
-        0.0
-    };
-
-    // If Number is called as a function, return the value.
-    Ok(value.into())
+        // If Number is called as a function, return the value.
+        Ok(value.into())
+    }
 }
 
 fn to_string<'gc>(

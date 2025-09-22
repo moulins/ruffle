@@ -45,26 +45,23 @@ impl<'gc> DeclContext<'_, 'gc> {
         SystemClass { proto, constr }
     }
 
-    /// Creates a class with a 'special' constructor. This should be used for classes with a native
+    /// Creates a class with a 'builtin' constructor. This should be used for classes with a native
     /// constructor in Flash Player's `playerglobals.swf`.
-    pub fn native_class(
+    pub fn builtin_class(
         &self,
         constructor: NativeFunction,
-        function: Option<NativeFunction>,
         super_proto: Object<'gc>,
     ) -> SystemClass<'gc> {
         let proto = Object::new(self.strings, Some(super_proto));
-        Self::native_class_with_proto(self, constructor, function, proto)
+        Self::builtin_class_with_proto(self, constructor, proto)
     }
 
-    pub fn native_class_with_proto(
+    pub fn builtin_class_with_proto(
         &self,
         constructor: NativeFunction,
-        function: Option<NativeFunction>,
         proto: Object<'gc>,
     ) -> SystemClass<'gc> {
-        let constr =
-            FunctionObject::constructor(self.strings, constructor, function, self.fn_proto, proto);
+        let constr = FunctionObject::constructor(self.strings, constructor, self.fn_proto, proto);
         SystemClass { proto, constr }
     }
 }

@@ -329,7 +329,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(drop_shadow_filter_method!(0), None, super_proto);
+    let class = context.builtin_class(drop_shadow_filter_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -364,7 +364,7 @@ fn method<'gc>(
     const GET_HIDE_OBJECT: u8 = 21;
     const SET_HIDE_OBJECT: u8 = 22;
 
-    if index == CONSTRUCTOR {
+    if index == CONSTRUCTOR && activation.consume_native_constructor_flag() {
         let drop_shadow_filter = DropShadowFilter::new(activation, args)?;
         this.set_native(
             activation.gc(),

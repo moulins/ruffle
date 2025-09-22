@@ -110,7 +110,7 @@ impl<'a> ActivationIdentifier<'a> {
         max_recursion_depth: u16,
     ) -> Result<Self, Error<'gc>> {
         let (function_count, special_count) = match reason {
-            ExecutionReason::FunctionCall => {
+            ExecutionReason::FunctionCall | ExecutionReason::ConstructorCall => {
                 if self.function_count >= max_recursion_depth - 1 {
                     return Err(Error::FunctionRecursionLimit(max_recursion_depth));
                 }
@@ -190,6 +190,11 @@ pub struct Activation<'a, 'gc: 'a> {
     /// This is often the name of a function (if known), or some static name to indicate where
     /// in the code it is (for example, a with{} block).
     pub id: ActivationIdentifier<'a>,
+
+    /// Flag indicating that a builtin native constructor is currently running.
+    /// This is used by these constructors to determine whether they've been called as
+    /// a constructor (`new Class()` or `super()`), or as a simple function (`Class()`).
+    is_builtin_constructor_call: bool,
 }
 
 impl Drop for Activation<'_, '_> {
@@ -242,6 +247,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             this,
             callee,
             local_registers: None,
+            is_builtin_constructor_call: false,
         }
     }
 
@@ -265,6 +271,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             this: self.this,
             callee: self.callee,
             local_registers: self.local_registers.clone(),
+            is_builtin_constructor_call: false,
         }
     }
 
@@ -294,6 +301,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
             callee: None,
             local_registers: None,
             context,
+            is_builtin_constructor_call: false,
         }
     }
 
@@ -325,6 +333,35 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         } else {
             None
         }
+    }
+
+    /// Temporarily mark this activation as executing a native method.
+    ///
+    /// If `is_builtin_constructor` is set, `Self::consume_constructor_flag` must be
+    /// called *exactly once* before any further manipulation of the activation;
+    /// failure to do so is a logic error.
+    #[inline(always)]
+    pub fn for_native_call<R>(
+        &mut self,
+        is_builtin_constructor: bool,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        debug_assert!(
+            !self.is_builtin_constructor_call,
+            "a previously-called builtin constructor failed to call `activation.consume_constructor_flag()`",
+        );
+        self.is_builtin_constructor_call = is_builtin_constructor;
+        let ret = f(self);
+        debug_assert!(
+            !self.is_builtin_constructor_call,
+            "builtin constructor must call `activation.consume_constructor_flag()`"
+        );
+        ret
+    }
+
+    #[must_use]
+    pub fn consume_native_constructor_flag(&mut self) -> bool {
+        core::mem::take(&mut self.is_builtin_constructor_call)
     }
 
     /// Add a stack frame that executes code in timeline scope

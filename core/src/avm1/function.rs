@@ -30,6 +30,9 @@ pub enum ExecutionReason {
     /// This execution is a "normal" function call from ActionScript bytecode.
     FunctionCall,
 
+    /// This execution is a "normal" constructor call from ActionScript bytecode.
+    ConstructorCall,
+
     /// This execution is a "special" internal function call from the player,
     /// such as getters, setters, `toString`, or event handlers.
     Special,
@@ -410,6 +413,11 @@ enum Executable<'gc> {
     /// A function provided by the Ruffle runtime and implemented in Rust.
     Native(#[collect(require_static)] NativeFunction),
 
+    /// A constructor provided by the Ruffle runtime and implemented in Rust.
+    /// Unlike `Native`, this can detect whether it was called with `new` or a simple
+    /// function call.
+    NativeConstr(#[collect(require_static)] NativeFunction),
+
     /// ActionScript data defined by a previous `DefineFunction` or
     /// `DefineFunction2` action.
     Action(Gc<'gc, Avm1Function<'gc>>),
@@ -438,11 +446,6 @@ impl<'gc> From<AvmString<'gc>> for ExecutionName<'gc> {
 pub struct FunctionObject<'gc> {
     /// The code that will be invoked when this object is called.
     function: Executable<'gc>,
-    /// The code that will be invoked when this object is constructed.
-    ///
-    /// If `None`, falls back to `function`.
-    #[collect(require_static)]
-    constructor: Option<NativeFunction>,
 }
 
 impl<'gc> FunctionObject<'gc> {
@@ -454,18 +457,11 @@ impl<'gc> FunctionObject<'gc> {
     fn allocate_function(
         context: &StringContext<'gc>,
         function: Executable<'gc>,
-        constructor: Option<NativeFunction>,
         fn_proto: Object<'gc>,
         prototype: Option<Object<'gc>>,
     ) -> Object<'gc> {
         let obj = Object::new(context, Some(fn_proto));
-        let native = NativeObject::Function(Gc::new(
-            context.gc(),
-            Self {
-                function,
-                constructor,
-            },
-        ));
+        let native = NativeObject::Function(Gc::new(context.gc(), Self { function }));
         obj.set_native(context.gc(), native);
 
         if let Some(prototype) = prototype {
@@ -495,7 +491,7 @@ impl<'gc> FunctionObject<'gc> {
         prototype: Object<'gc>,
     ) -> Object<'gc> {
         let empty = Executable::Native(|_, _, _| Ok(Value::Undefined));
-        Self::allocate_function(context, empty, None, fn_proto, Some(prototype))
+        Self::allocate_function(context, empty, fn_proto, Some(prototype))
     }
 
     /// Construct a function from AVM1 bytecode and associated protos.
@@ -505,43 +501,40 @@ impl<'gc> FunctionObject<'gc> {
         fn_proto: Object<'gc>,
         prototype: Object<'gc>,
     ) -> Object<'gc> {
-        let function = Executable::Action(function);
-        Self::allocate_function(context, function, None, fn_proto, Some(prototype))
+        let f = Executable::Action(function);
+        Self::allocate_function(context, f, fn_proto, Some(prototype))
     }
 
     /// Construct a function from a native executable and associated protos.
+    ///
+    /// If `prototype` is `None`, this will return a bare function.
     pub fn native(
         context: &StringContext<'gc>,
         function: NativeFunction,
         fn_proto: Object<'gc>,
         prototype: Option<Object<'gc>>,
     ) -> Object<'gc> {
-        let function = Executable::Native(function);
-        Self::allocate_function(context, function, None, fn_proto, prototype)
+        let f = Executable::Native(function);
+        Self::allocate_function(context, f, fn_proto, prototype)
     }
 
-    /// Construct a native constructor from native executables and associated protos.
+    /// Construct a builtin constructor from a native executable and associated protos.
     ///
     /// This differs from [`Self::native`] in two important ways:
     /// - When called through `new`, the return value will always become the result of the
     ///   operation. Native constructors should therefore generally return either `this`,
     ///   if the object was successfully constructed, or `undefined` if not.
-    /// - When called as a normal function, `function` will be called instead of `constructor`;
-    ///   if it is `None`, the return value will be `undefined`.
+    /// - Before any other manipulations, the builtin constructor *must* call
+    ///   `activation.consume_native_constructor_flag()` to determine whether it is called
+    ///   as a constructor or as a function; failing to do so is a logic error.
     pub fn constructor(
         context: &StringContext<'gc>,
         constructor: NativeFunction,
-        function: Option<NativeFunction>,
         fn_proto: Object<'gc>,
         prototype: Object<'gc>,
     ) -> Object<'gc> {
-        Self::allocate_function(
-            context,
-            Executable::Native(function.unwrap_or(|_, _, _| Ok(Value::Undefined))),
-            Some(constructor),
-            fn_proto,
-            Some(prototype),
-        )
+        let f = Executable::NativeConstr(constructor);
+        Self::allocate_function(context, f, fn_proto, Some(prototype))
     }
 
     /// Execute the given code.
@@ -559,38 +552,16 @@ impl<'gc> FunctionObject<'gc> {
         callee: Object<'gc>,
     ) -> Result<Value<'gc>, Error<'gc>> {
         match self.function {
-            Executable::Native(nf) => {
+            Executable::Native(native) | Executable::NativeConstr(native) => {
+                let is_builtin_constructor = matches!(
+                    (self.function, reason),
+                    (Executable::NativeConstr(_), ExecutionReason::ConstructorCall),
+                );
                 // TODO: Change NativeFunction to accept `this: Value`.
                 let this = this.coerce_to_object(activation);
-                nf(activation, this, args)
-            }
-            Executable::Action(af) => af.exec(name, activation, this, depth, args, reason, callee),
-        }
-    }
-
-    /// Execute the given code as a constructor.
-    ///
-    /// This is fairly low-level; prefer using other call methods if possible.
-    #[expect(clippy::too_many_arguments)]
-    pub fn exec_constructor(
-        self,
-        name: ExecutionName<'gc>,
-        activation: &mut Activation<'_, 'gc>,
-        this: Value<'gc>,
-        depth: u8,
-        args: &[Value<'gc>],
-        reason: ExecutionReason,
-        callee: Object<'gc>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        let constr = match self.constructor {
-            Some(constr) => Executable::Native(constr),
-            None => self.function,
-        };
-        match constr {
-            Executable::Native(nf) => {
-                // TODO: Change NativeFunction to accept `this: Value`.
-                let this = this.coerce_to_object(activation);
-                nf(activation, this, args)
+                activation.for_native_call(is_builtin_constructor, |activation| {
+                    native(activation, this, args)
+                })
             }
             Executable::Action(af) => af.exec(name, activation, this, depth, args, reason, callee),
         }
@@ -625,16 +596,15 @@ impl<'gc> FunctionObject<'gc> {
         Self::define_constructor_props(activation, this, callee.into());
 
         // Always ignore the constructor's return value.
-        let _ = self.exec_constructor(
+        let _ = self.exec(
             ExecutionName::Static("[ctor]"),
             activation,
             this.into(),
             1,
             args,
-            ExecutionReason::FunctionCall,
+            ExecutionReason::ConstructorCall,
             callee,
         )?;
-
         Ok(())
     }
 
@@ -651,15 +621,15 @@ impl<'gc> FunctionObject<'gc> {
 
         Self::define_constructor_props(activation, this, callee.into());
 
-        // Propagate the return value only for native constructors.
-        let propagate = self.constructor.is_some();
-        let ret = self.exec_constructor(
+        // Only propagate the return value for builtin constructors.
+        let propagate = matches!(self.function, Executable::NativeConstr(_));
+        let ret = self.exec(
             ExecutionName::Static("[ctor]"),
             activation,
             this.into(),
             1,
             args,
-            ExecutionReason::FunctionCall,
+            ExecutionReason::ConstructorCall,
             callee,
         )?;
         Ok(if propagate { ret } else { this.into() })

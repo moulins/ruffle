@@ -409,7 +409,7 @@ pub fn create_bevel_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(gradient_filter_method!(1000), None, super_proto);
+    let class = context.builtin_class(gradient_filter_method!(1000), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -418,7 +418,7 @@ pub fn create_glow_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(gradient_filter_method!(0), None, super_proto);
+    let class = context.builtin_class(gradient_filter_method!(0), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -454,20 +454,16 @@ fn method<'gc>(
     const SET_TYPE: u16 = 22;
     const BEVEL_CONSTRUCTOR: u16 = 1000;
 
-    if index == BEVEL_CONSTRUCTOR {
-        let gradient_bevel_filter = GradientFilter::new(activation, args)?;
-        this.set_native(
-            activation.gc(),
-            NativeObject::GradientBevelFilter(gradient_bevel_filter),
-        );
-        return Ok(this.into());
-    }
-    if index == GLOW_CONSTRUCTOR {
-        let gradient_glow_filter = GradientFilter::new(activation, args)?;
-        this.set_native(
-            activation.gc(),
-            NativeObject::GradientGlowFilter(gradient_glow_filter),
-        );
+    if matches!(index, GLOW_CONSTRUCTOR | BEVEL_CONSTRUCTOR)
+        && activation.consume_native_constructor_flag()
+    {
+        let filter = GradientFilter::new(activation, args)?;
+        let filter = match index {
+            GLOW_CONSTRUCTOR => NativeObject::GradientGlowFilter(filter),
+            BEVEL_CONSTRUCTOR => NativeObject::GradientBevelFilter(filter),
+            _ => unreachable!(),
+        };
+        this.set_native(activation.gc(), filter);
         return Ok(this.into());
     }
 

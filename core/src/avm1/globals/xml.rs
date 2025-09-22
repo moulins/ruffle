@@ -273,7 +273,7 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(constructor, None, super_proto);
+    let class = context.builtin_class(constructor, super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     class
 }
@@ -284,6 +284,10 @@ fn constructor<'gc>(
     this: Object<'gc>,
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
+    if !activation.consume_native_constructor_flag() {
+        return Ok(Value::Undefined);
+    }
+
     let xml = Xml::empty(&activation.context.strings, this);
 
     if let [text, ..] = args {

@@ -346,13 +346,13 @@ pub fn create_class<'gc>(
     context: &mut DeclContext<'_, 'gc>,
     super_proto: Object<'gc>,
 ) -> SystemClass<'gc> {
-    let class = context.native_class(date_method!(256), Some(function), super_proto);
+    let class = context.builtin_class(date_method!(256), super_proto);
     context.define_properties_on(class.proto, PROTO_DECLS);
     context.define_properties_on(class.constr, OBJECT_DECLS);
     class
 }
 
-/// ECMA-262 Date
+/// ECMA-262 Date constructor
 fn constructor<'gc>(
     activation: &mut Activation<'_, 'gc>,
     this: Object<'gc>,
@@ -382,15 +382,6 @@ fn constructor<'gc>(
         NativeObject::Date(Gc::new(activation.gc(), Cell::new(date))),
     );
     Ok(this.into())
-}
-
-/// `Date()` invoked without `new` returns current date and time as a string, as defined in ECMA-262.
-fn function<'gc>(
-    activation: &mut Activation<'_, 'gc>,
-    _this: Object<'gc>,
-    _args: &[Value<'gc>],
-) -> Result<Value<'gc>, Error<'gc>> {
-    Ok(AvmString::new_utf8(activation.gc(), Date::now().local().to_string()).into())
 }
 
 /// ECMA-262 Date.UTC
@@ -438,6 +429,11 @@ fn method<'gc>(
     const SET_YEAR: u16 = 20;
     const CONSTRUCTOR: u16 = 256;
     const UTC: u16 = 257;
+
+    // `Date()` invoked without `new` returns current date and time as a string, as defined in ECMA-262.
+    if index == CONSTRUCTOR && !activation.consume_native_constructor_flag() {
+        return Ok(AvmString::new_utf8(activation.gc(), Date::now().local().to_string()).into());
+    }
 
     let mut values = Vec::with_capacity(7);
     for arg in args.iter().take(7) {
