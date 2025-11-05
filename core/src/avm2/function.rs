@@ -1,5 +1,5 @@
 use crate::avm2::Multiname;
-use crate::avm2::activation::Activation;
+use crate::avm2::activation::{Activation, ActivationWithLocals};
 use crate::avm2::error::{Error, make_error_1063};
 use crate::avm2::method::{Method, MethodKind, ParamConfig};
 use crate::avm2::object::{ClassObject, FunctionObject};
@@ -247,7 +247,7 @@ pub fn exec<'gc>(
 
             // This used to be a one step called Activation::from_method,
             // but avoiding moving an Activation around helps perf
-            let mut activation = Activation::from_nothing(activation.context);
+            let mut activation = ActivationWithLocals::from_nothing(activation.context);
             if let Err(e) = activation.init_from_method(
                 method,
                 scope,

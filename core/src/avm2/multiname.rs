@@ -1,10 +1,8 @@
-use crate::avm2::Error;
-use crate::avm2::QName;
-use crate::avm2::activation::Activation;
+use crate::avm2::activation::{Activation, ActivationWithLocals};
 use crate::avm2::error::{make_error_1032, make_error_1080, make_error_1107};
 use crate::avm2::namespace::Namespace;
 use crate::avm2::script::TranslationUnit;
-use crate::avm2::{Object, Value};
+use crate::avm2::{Error, Object, QName, Value};
 use crate::string::{AvmString, StringContext, WStr, WString};
 use bitflags::bitflags;
 use gc_arena::Gc;
@@ -299,7 +297,7 @@ impl<'gc> Multiname<'gc> {
 
     pub fn fill_with_runtime_params(
         &self,
-        activation: &mut Activation<'_, 'gc>,
+        activation: &mut ActivationWithLocals<'_, 'gc>,
     ) -> Result<Self, Error<'gc>> {
         let name = if self.has_lazy_name() {
             let name_value = activation.pop_stack();

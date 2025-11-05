@@ -31,14 +31,12 @@ use gc_arena::Gc;
 use ruffle_macros::istr;
 use std::cell::Cell;
 use std::cmp::{Ordering, min};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use swf::avm2::types::MethodFlags as AbcMethodFlags;
 
 /// Represents a single activation of a given AVM2 function or keyframe.
 pub struct Activation<'a, 'gc: 'a> {
-    /// The number of locals this method uses.
-    num_locals: usize,
-
     /// This represents the outer scope of the method that is executing.
     ///
     /// The outer scope gives an activation access to the "outer world", including
@@ -70,9 +68,6 @@ pub struct Activation<'a, 'gc: 'a> {
     ///
     /// This will not be available outside of method, setter, or getter calls.
     bound_superclass_object: Option<ClassObject<'gc>>,
-
-    /// The stack frame.
-    stack: StackFrame<'a, 'gc>,
 
     /// The index where the scope frame starts.
     scope_depth: usize,
@@ -132,12 +127,10 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// `Activation`.
     pub fn from_nothing(context: &'a mut UpdateContext<'gc>) -> Self {
         Self {
-            num_locals: 0,
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: None,
             caller_movie: None,
             bound_superclass_object: None,
-            stack: StackFrame::empty(),
             scope_depth: context.avm2.scope_stack.len(),
             is_interpreter: false,
             default_xml_namespace: None,
@@ -156,15 +149,39 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     /// `SwfMovie` associated with the `MovieClip` being processed.
     pub fn from_domain(context: &'a mut UpdateContext<'gc>, domain: Domain<'gc>) -> Self {
         Self {
-            num_locals: 0,
             outer: ScopeChain::new(context.avm2.stage_domain),
             caller_domain: Some(domain),
             caller_movie: None,
             bound_superclass_object: None,
-            stack: StackFrame::empty(),
             scope_depth: context.avm2.scope_stack.len(),
             is_interpreter: false,
             default_xml_namespace: None,
+            context,
+        }
+    }
+
+    /// Construct an activation for the execution of a builtin method.
+    ///
+    /// It is a logic error to attempt to execute builtins within the same
+    /// activation as the method or script that called them. You must use this
+    /// function to construct a new activation for the builtin so that it can
+    /// properly supercall.
+    pub fn from_builtin(
+        context: &'a mut UpdateContext<'gc>,
+        bound_superclass_object: Option<ClassObject<'gc>>,
+        outer: ScopeChain<'gc>,
+        caller_domain: Option<Domain<'gc>>,
+        caller_movie: Option<Arc<SwfMovie>>,
+        caller_dxns: Option<AvmString<'gc>>,
+    ) -> Self {
+        Self {
+            outer,
+            caller_domain,
+            caller_movie,
+            bound_superclass_object,
+            scope_depth: context.avm2.scope_stack.len(),
+            is_interpreter: false,
+            default_xml_namespace: caller_dxns,
             context,
         }
     }
@@ -254,6 +271,138 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         }
 
         Ok(arguments_list)
+    }
+
+    pub fn domain(&self) -> Domain<'gc> {
+        self.outer.domain()
+    }
+
+    fn domain_memory(&self) -> ByteArrayObject<'gc> {
+        self.outer.domain().domain_memory()
+    }
+
+    /// Returns whether this Activation is running in "interpreter mode" as
+    /// opposed to "JIT mode". Note that these modes do not actually correspond
+    /// to whether the method is being interpreted or JITted.
+    pub fn is_interpreter(&self) -> bool {
+        self.is_interpreter
+    }
+
+    /// Get the current default XML namespace URI for this activation, if any.
+    pub fn default_xml_namespace(&self) -> Option<AvmString<'gc>> {
+        self.default_xml_namespace
+    }
+
+    /// Get the superclass of the class that defined the currently-executing
+    /// method, if it exists.
+    ///
+    /// If the currently-executing method is not part of a class, then this
+    /// returns `None`.
+    pub fn bound_superclass_object(&self) -> Option<ClassObject<'gc>> {
+        self.bound_superclass_object
+    }
+
+    /// Retrieve the outer scope of this activation
+    pub fn outer(&self) -> ScopeChain<'gc> {
+        self.outer
+    }
+
+    /// Sets the outer scope of this activation
+    pub fn set_outer(&mut self, new_outer: ScopeChain<'gc>) {
+        self.outer = new_outer;
+    }
+
+    /// Creates a new ScopeChain by chaining the current state of this
+    /// activation's scope stack with the outer scope.
+    pub fn create_scopechain(&self) -> ScopeChain<'gc> {
+        self.outer.chain(self.gc(), self.scope_frame())
+    }
+
+    /// Returns the domain of the original AS3 caller. This will be `None`
+    /// if this activation was constructed with `from_nothing`
+    pub fn caller_domain(&self) -> Option<Domain<'gc>> {
+        self.caller_domain
+    }
+
+    /// Returns the movie of the original AS3 caller. This will be `None`
+    /// if this activation was constructed with `from_nothing`
+    pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
+        self.caller_movie.clone()
+    }
+
+    /// Like `caller_movie()`, but returns the root movie if `caller_movie`
+    /// is `None`. This matches what FP does in most cases.
+    pub fn caller_movie_or_root(&self) -> Arc<SwfMovie> {
+        self.caller_movie().unwrap_or(self.context.root_swf.clone())
+    }
+
+    /// Returns the global scope of this activation.
+    ///
+    /// The global scope refers to scope at the bottom of the
+    /// outer scope. If the outer scope is empty, we use the bottom
+    /// of the current scope stack instead.
+    ///
+    /// The verifier guarantees that there is always a global scope
+    /// when this function is called.
+    pub fn global_scope(&self) -> Value<'gc> {
+        let outer_scope = self.outer;
+        outer_scope
+            .get(0)
+            .unwrap_or_else(|| self.scope_frame()[0])
+            .values()
+    }
+
+    pub fn avm2(&mut self) -> &mut Avm2<'gc> {
+        self.context.avm2
+    }
+
+    pub fn scope_frame(&self) -> &[Scope<'gc>] {
+        &self.context.avm2.scope_stack[self.scope_depth..]
+    }
+}
+
+/// An `Activation` together with its local stack.
+///
+/// This is split from `Activation` for two reasons:
+/// - many activations don't need locals at all;
+/// - it allows more flexibility with regards to the borrow checker.
+pub struct ActivationWithLocals<'a, 'gc> {
+    inner: Activation<'a, 'gc>,
+    /// The number of locals this method uses.
+    num_locals: usize,
+    /// The stack frame.
+    stack: StackFrame<'a, 'gc>,
+}
+
+impl<'gc> HasStringContext<'gc> for ActivationWithLocals<'_, 'gc> {
+    #[inline(always)]
+    fn strings_ref(&self) -> &StringContext<'gc> {
+        &self.context.strings
+    }
+}
+
+impl<'a, 'gc> Deref for ActivationWithLocals<'a, 'gc> {
+    type Target = Activation<'a, 'gc>;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'a, 'gc> DerefMut for ActivationWithLocals<'a, 'gc> {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
+    pub fn from_nothing(context: &'a mut UpdateContext<'gc>) -> Self {
+        Self {
+            inner: Activation::from_nothing(context),
+            num_locals: 0,
+            stack: StackFrame::empty(),
+        }
     }
 
     /// Create an `arguments` or `rest` object for a given method. This function
@@ -427,34 +576,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
         Ok(())
     }
 
-    /// Construct an activation for the execution of a builtin method.
-    ///
-    /// It is a logic error to attempt to execute builtins within the same
-    /// activation as the method or script that called them. You must use this
-    /// function to construct a new activation for the builtin so that it can
-    /// properly supercall.
-    pub fn from_builtin(
-        context: &'a mut UpdateContext<'gc>,
-        bound_superclass_object: Option<ClassObject<'gc>>,
-        outer: ScopeChain<'gc>,
-        caller_domain: Option<Domain<'gc>>,
-        caller_movie: Option<Arc<SwfMovie>>,
-        caller_dxns: Option<AvmString<'gc>>,
-    ) -> Self {
-        Self {
-            num_locals: 0,
-            outer,
-            caller_domain,
-            caller_movie,
-            bound_superclass_object,
-            stack: StackFrame::empty(),
-            scope_depth: context.avm2.scope_stack.len(),
-            is_interpreter: false,
-            default_xml_namespace: caller_dxns,
-            context,
-        }
-    }
-
     /// Call the superclass's instance initializer.
     ///
     /// This method may panic if called with a Null or Undefined receiver.
@@ -480,76 +601,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     pub fn set_local_register(&mut self, id: u32, value: impl Into<Value<'gc>>) {
         // Verification guarantees that this is valid
         self.stack.set_value_at(id as usize, value.into());
-    }
-
-    /// Returns whether this Activation is running in "interpreter mode" as
-    /// opposed to "JIT mode". Note that these modes do not actually correspond
-    /// to whether the method is being interpreted or JITted.
-    pub fn is_interpreter(&self) -> bool {
-        self.is_interpreter
-    }
-
-    /// Get the current default XML namespace URI for this activation, if any.
-    pub fn default_xml_namespace(&self) -> Option<AvmString<'gc>> {
-        self.default_xml_namespace
-    }
-
-    /// Retrieve the outer scope of this activation
-    pub fn outer(&self) -> ScopeChain<'gc> {
-        self.outer
-    }
-
-    /// Sets the outer scope of this activation
-    pub fn set_outer(&mut self, new_outer: ScopeChain<'gc>) {
-        self.outer = new_outer;
-    }
-
-    /// Creates a new ScopeChain by chaining the current state of this
-    /// activation's scope stack with the outer scope.
-    pub fn create_scopechain(&self) -> ScopeChain<'gc> {
-        self.outer.chain(self.gc(), self.scope_frame())
-    }
-
-    /// Returns the domain of the original AS3 caller. This will be `None`
-    /// if this activation was constructed with `from_nothing`
-    pub fn caller_domain(&self) -> Option<Domain<'gc>> {
-        self.caller_domain
-    }
-
-    /// Returns the movie of the original AS3 caller. This will be `None`
-    /// if this activation was constructed with `from_nothing`
-    pub fn caller_movie(&self) -> Option<Arc<SwfMovie>> {
-        self.caller_movie.clone()
-    }
-
-    /// Like `caller_movie()`, but returns the root movie if `caller_movie`
-    /// is `None`. This matches what FP does in most cases.
-    pub fn caller_movie_or_root(&self) -> Arc<SwfMovie> {
-        self.caller_movie().unwrap_or(self.context.root_swf.clone())
-    }
-
-    /// Returns the global scope of this activation.
-    ///
-    /// The global scope refers to scope at the bottom of the
-    /// outer scope. If the outer scope is empty, we use the bottom
-    /// of the current scope stack instead.
-    ///
-    /// The verifier guarantees that there is always a global scope
-    /// when this function is called.
-    pub fn global_scope(&self) -> Value<'gc> {
-        let outer_scope = self.outer;
-        outer_scope
-            .get(0)
-            .unwrap_or_else(|| self.scope_frame()[0])
-            .values()
-    }
-
-    pub fn avm2(&mut self) -> &mut Avm2<'gc> {
-        self.context.avm2
-    }
-
-    pub fn scope_frame(&self) -> &[Scope<'gc>] {
-        &self.context.avm2.scope_stack[self.scope_depth..]
     }
 
     /// Pushes a value onto the operand stack.
@@ -602,8 +653,7 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
     /// Cleans up after this Activation. This removes stack and local entries,
     /// and clears the scope stack. This method must be called after an Activation
-    /// created with `Activation::init_from_activation` or `Activation::from_script`
-    /// is finished executing.
+    /// created with `Activation::init_from_method` is finished executing.
     ///
     /// This function should take `mut self` instead of `&mut self`, but that
     /// results in worse codegen (the entire Activation is moved).
@@ -631,15 +681,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
     fn clear_scope(&mut self) {
         let scope_depth = self.scope_depth;
         self.avm2().scope_stack.truncate(scope_depth);
-    }
-
-    /// Get the superclass of the class that defined the currently-executing
-    /// method, if it exists.
-    ///
-    /// If the currently-executing method is not part of a class, then this
-    /// returns `None`.
-    pub fn bound_superclass_object(&self) -> Option<ClassObject<'gc>> {
-        self.bound_superclass_object
     }
 
     pub fn run_actions(&mut self, method: Method<'gc>) -> Result<Value<'gc>, Error<'gc>> {
@@ -2690,14 +2731,6 @@ impl<'a, 'gc> Activation<'a, 'gc> {
 
         self.push_stack(x);
         Ok(())
-    }
-
-    pub fn domain(&self) -> Domain<'gc> {
-        self.outer.domain()
-    }
-
-    fn domain_memory(&self) -> ByteArrayObject<'gc> {
-        self.outer.domain().domain_memory()
     }
 
     /// Implements `Op::Si8`
