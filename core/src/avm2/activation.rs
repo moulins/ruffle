@@ -29,7 +29,6 @@ use crate::string::{AvmAtom, AvmString, HasStringContext, StringContext};
 use crate::tag_utils::SwfMovie;
 use gc_arena::Gc;
 use ruffle_macros::istr;
-use std::cell::Cell;
 use std::cmp::{Ordering, min};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -563,9 +562,10 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
             self.push_stack(args_object);
         }
 
-        // `Stack::get_stack_frame` already initializes all values on the frame
-        // to undefined, so we just have to increase the stack pointer
-        self.reset_stack();
+        // Fill all remaining local registers with `undefined`.
+        while self.stack.len() < num_locals {
+            self.stack.push(Value::Undefined);
+        }
 
         // Inherit the caller's default XML namespace if this method doesn't
         // set its own via dxns opcodes.
@@ -574,21 +574,6 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         }
 
         Ok(())
-    }
-
-    /// Call the superclass's instance initializer.
-    ///
-    /// This method may panic if called with a Null or Undefined receiver.
-    fn super_init(
-        &mut self,
-        receiver: Value<'gc>,
-        args: FunctionArgs<'_, 'gc>,
-    ) -> Result<Value<'gc>, Error<'gc>> {
-        let bound_superclass_object = self
-            .bound_superclass_object
-            .expect("Superclass object is required to run super_init");
-
-        bound_superclass_object.call_init(receiver, args, self)
     }
 
     /// Retrieve a local register.
@@ -605,38 +590,15 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
 
     /// Pushes a value onto the operand stack.
     #[inline(always)]
-    pub fn push_stack(&self, value: impl Into<Value<'gc>>) {
+    fn push_stack(&mut self, value: impl Into<Value<'gc>>) {
         self.stack.push(value.into());
     }
 
     /// Pops a value off the operand stack.
     #[inline(always)]
     #[must_use]
-    pub fn pop_stack(&self) -> Value<'gc> {
+    fn pop_stack(&self) -> Value<'gc> {
         self.stack.pop()
-    }
-
-    /// Pops multiple values off the operand stack, collecting them into a collection.
-    #[inline]
-    #[must_use]
-    pub fn pop_stack_args<C>(&self, arg_count: u32) -> C
-    where
-        C: FromIterator<Value<'gc>>,
-    {
-        self.stack
-            .pop_args(arg_count)
-            .iter()
-            .map(Cell::get)
-            .collect()
-    }
-
-    /// Pops multiple values off the operand stack.
-    #[inline]
-    #[must_use]
-    pub fn get_args(&self, arg_count: u32) -> FunctionArgs<'a, 'gc> {
-        let slice = self.stack.pop_args(arg_count);
-
-        FunctionArgs::from_cell_slice(slice)
     }
 
     /// Pushes a scope onto the scope stack.
@@ -661,8 +623,8 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     pub fn cleanup(&mut self) {
         self.clear_scope();
 
-        let stack = self.context.avm2.stack;
-        stack.dispose_stack_frame(self.stack.take());
+        let stack = std::mem::replace(&mut self.stack, StackFrame::empty());
+        self.context.avm2.stack.dispose_stack_frame(stack);
     }
 
     /// Clears the operand stack used by this activation.
@@ -673,7 +635,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     fn reset_stack(&self) {
         // This sets the stack pointer to the first stack entry, which is right
         // after all the entries for local registers
-        self.stack.set_stack_pointer(self.num_locals);
+        self.stack.truncate(self.num_locals);
     }
 
     /// Clears the scope stack used by this activation.
@@ -1089,11 +1051,12 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_call(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
+        let args = self.stack.pop_slice(arg_count as usize);
         let receiver = self.pop_stack();
         let function = self.pop_stack();
 
-        let value = function.call(self, receiver, args)?;
+        let args = FunctionArgs::from_slice(args);
+        let value = function.call(&mut self.inner, receiver, args)?;
 
         self.push_stack(value);
 
@@ -1113,10 +1076,11 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
 
         // However, the optimizer can still generate it.
 
-        let args = self.get_args(arg_count);
-        let receiver = self.pop_stack().null_check(self, None)?;
+        let args = self.stack.pop_slice(arg_count as usize);
+        let receiver = self.pop_stack();
 
-        let value = receiver.call_method_with_args(index, args, self)?;
+        let receiver = receiver.null_check(&mut self.inner, None)?;
+        let value = receiver.call_method(index, args, &mut self.inner)?;
 
         if push_return_value {
             self.push_stack(value);
@@ -1131,15 +1095,12 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         num_args: u32,
         push_return_value: bool,
     ) -> Result<(), Error<'gc>> {
-        let mut args_buf = [Value::Undefined; 2];
-        let args = &mut args_buf[..num_args as usize];
-        for arg in args.iter_mut().rev() {
-            *arg = self.pop_stack();
-        }
+        let args = self.stack.pop_slice(num_args as usize);
+        let receiver = self.pop_stack();
 
-        let receiver = self.pop_stack().null_check(self, None)?;
-
-        let value = method(self, receiver, args).expect("FastCall methods should not return Err");
+        let receiver = receiver.null_check(&mut self.inner, None)?;
+        let value = method(&mut self.inner, receiver, args)
+            .expect("FastCall methods should not return Err");
 
         if push_return_value {
             self.push_stack(value);
@@ -1153,11 +1114,13 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
-        let multiname = multiname.fill_with_runtime_params(self)?;
-        let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
+        let args = self.stack.pop_slice(arg_count as usize);
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
+        let receiver = self.pop_stack();
 
-        let value = receiver.call_property(&multiname, args, self)?;
+        let receiver = receiver.null_check(&mut self.inner, Some(&multiname))?;
+        let args = FunctionArgs::from_slice(args);
+        let value = receiver.call_property(&multiname, args, &mut self.inner)?;
 
         self.push_stack(value);
 
@@ -1169,11 +1132,14 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
-        let multiname = multiname.fill_with_runtime_params(self)?;
-        let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
-        let function = receiver.get_property(&multiname, self)?;
-        let value = function.call(self, Value::Null, args)?;
+        let args = self.stack.pop_slice(arg_count as usize);
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
+        let receiver = self.pop_stack();
+
+        let receiver = receiver.null_check(&mut self.inner, Some(&multiname))?;
+        let function = receiver.get_property(&multiname, &mut self.inner)?;
+        let args = FunctionArgs::from_slice(args);
+        let value = function.call(&mut self.inner, Value::Null, args)?;
 
         self.push_stack(value);
 
@@ -1185,30 +1151,33 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
-        let multiname = multiname.fill_with_runtime_params(self)?;
-        let receiver = self.pop_stack().null_check(self, Some(&multiname))?;
+        let args = self.stack.pop_slice(arg_count as usize);
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
+        let receiver = self.pop_stack();
 
-        receiver.call_property(&multiname, args, self)?;
+        let receiver = receiver.null_check(&mut self.inner, Some(&multiname))?;
+        let args = FunctionArgs::from_slice(args);
+        receiver.call_property(&multiname, args, &mut self.inner)?;
 
         Ok(())
     }
 
     fn op_call_static(&mut self, method: Method<'gc>, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
+        let args = self.stack.pop_slice(arg_count as usize);
         let receiver = self.pop_stack();
 
         // Ensure receiver is of the correct type
         let bound_class = method
             .bound_class()
             .expect("Verifier ensures callstatic methods are classbound");
-        let receiver = receiver.coerce_to_type(self, bound_class)?;
+        let receiver = receiver.coerce_to_type(&mut self.inner, bound_class)?;
 
         // TODO: What scope should the function be executed with?
         let scope = self.create_scopechain();
 
-        let function = FunctionObject::from_method(self.context, method, scope, None, None);
-        let value = function.call(self, receiver, args)?;
+        let function = FunctionObject::from_method(self.inner.context, method, scope, None, None);
+        let args = FunctionArgs::from_slice(args);
+        let value = function.call(&mut self.inner, receiver, args)?;
 
         self.push_stack(value);
 
@@ -1220,24 +1189,28 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let args = self.stack.pop_slice(arg_count as usize);
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
+        let receiver = self.pop_stack();
 
         let bound_superclass_object = self
             .bound_superclass_object()
             .expect("Expected a superclass when running callsuper");
 
         // Ensure the receiver is of the correct type
-        let receiver = self
-            .pop_stack()
-            .coerce_to_type(self, bound_superclass_object.inner_class_definition())?;
+        let receiver = receiver.coerce_to_type(
+            &mut self.inner,
+            bound_superclass_object.inner_class_definition(),
+        )?;
 
         let receiver = receiver
-            .null_check(self, Some(&multiname))?
+            .null_check(&mut self.inner, Some(&multiname))?
             .as_object()
             .expect("Super ops should not appear in primitive functions");
 
-        let value = bound_superclass_object.call_super(&multiname, receiver, args, self)?;
+        let args = FunctionArgs::from_slice(args);
+        let value =
+            bound_superclass_object.call_super(&multiname, receiver, args, &mut self.inner)?;
 
         self.push_stack(value);
 
@@ -1334,7 +1307,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
     ) -> Result<(), Error<'gc>> {
         // main path for dynamic names
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
         let object = self.pop_stack().null_check(self, Some(&multiname))?;
 
         let value = object.get_property(&multiname, self)?;
@@ -1412,7 +1385,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
 
         let value = self.pop_stack();
 
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
         let object = self.pop_stack().null_check(self, Some(&multiname))?;
 
         object.set_property(&multiname, value, self)?;
@@ -1423,7 +1396,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     fn op_init_property(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
 
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
 
         let object = self.pop_stack().null_check(self, Some(&multiname))?;
 
@@ -1473,7 +1446,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
                 return Err(make_error_1119(self));
             }
         }
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
         let object = self.pop_stack().null_check(self, Some(&multiname))?;
 
         let did_delete = object.delete_property(self, &multiname)?;
@@ -1484,7 +1457,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_get_super(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
 
         let bound_superclass_object = self
             .bound_superclass_object()
@@ -1509,7 +1482,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
 
     fn op_set_super(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         let value = self.pop_stack();
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
 
         let bound_superclass_object = self
             .bound_superclass_object()
@@ -1645,7 +1618,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     fn op_find_property(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
         avm_debug!(self.context.avm2, "Resolving {:?}", *multiname);
 
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
         let result = self
             .find_definition(&multiname)?
             .unwrap_or_else(|| self.global_scope());
@@ -1661,7 +1634,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     ) -> Result<(), Error<'gc>> {
         avm_debug!(self.context.avm2, "Resolving {:?}", *multiname);
 
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
         let result = self
             .find_definition(&multiname)?
             .ok_or_else(|| make_error_1065(self, &multiname))?;
@@ -1680,7 +1653,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_get_descendants(&mut self, multiname: Gc<'gc, Multiname<'gc>>) -> Result<(), Error<'gc>> {
-        let multiname = multiname.fill_with_runtime_params(self)?;
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
         let object = self.pop_stack().null_check(self, None)?;
 
         if let Some(descendants) = object
@@ -1702,8 +1675,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         let stack_top = self.stack.stack_top();
 
         let object = stack_top
-            .get()
-            .null_check(self, None)?
+            .null_check(&mut self.inner, None)?
             .as_object()
             .expect("Cannot get_slot on primitive");
         let value = object.get_slot(index);
@@ -1712,7 +1684,7 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         // because it allows us to skip the extra bounds checks and stack pointer
         // changes. This is important here because getslot is one of the hottest
         // ops in most SWFs.
-        stack_top.set(value);
+        *stack_top = value;
 
         Ok(())
     }
@@ -1755,10 +1727,11 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_construct(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
+        let args = self.stack.pop_slice(arg_count as usize);
         let ctor = self.pop_stack();
 
-        let object = ctor.construct(self, args)?;
+        let args = FunctionArgs::from_slice(args);
+        let object = ctor.construct(&mut self.inner, args)?;
 
         self.push_stack(object);
 
@@ -1770,11 +1743,15 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
         multiname: Gc<'gc, Multiname<'gc>>,
         arg_count: u32,
     ) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
-        let multiname = multiname.fill_with_runtime_params(self)?;
-        let source = self.pop_stack().null_check(self, Some(&multiname))?;
+        let args = self.stack.pop_slice(arg_count as usize);
+        let multiname = multiname.fill_with_runtime_params(&mut self.inner, &self.stack)?;
+        let source = self
+            .pop_stack()
+            .null_check(&mut self.inner, Some(&multiname))?;
 
-        let constructed_object = source.construct_prop(self, &multiname, args)?;
+        let ctor = source.get_property(&multiname, &mut self.inner)?;
+        let args = FunctionArgs::from_slice(args);
+        let constructed_object = ctor.construct(&mut self.inner, args)?;
 
         self.push_stack(constructed_object);
 
@@ -1782,15 +1759,16 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_construct_slot(&mut self, index: u32, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
+        let args = self.stack.pop_slice(arg_count as usize);
         let source = self
             .pop_stack()
-            .null_check(self, None)?
+            .null_check(&mut self.inner, None)?
             .as_object()
             .expect("Cannot get_slot on primitive");
 
         let ctor = source.get_slot(index);
-        let constructed_object = ctor.construct(self, args)?;
+        let args = FunctionArgs::from_slice(args);
+        let constructed_object = ctor.construct(&mut self.inner, args)?;
 
         self.push_stack(constructed_object);
 
@@ -1798,10 +1776,15 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_construct_super(&mut self, arg_count: u32) -> Result<(), Error<'gc>> {
-        let args = self.get_args(arg_count);
-        let receiver = self.pop_stack().null_check(self, None)?;
+        let bound_superclass_object = self
+            .bound_superclass_object
+            .expect("Superclass object is required to run super_init");
 
-        self.super_init(receiver, args)?;
+        let args = self.stack.pop_slice(arg_count as usize);
+        let receiver = self.pop_stack().null_check(&mut self.inner, None)?;
+
+        let args = FunctionArgs::from_slice(args);
+        bound_superclass_object.call_init(receiver, args, &mut self.inner)?;
 
         Ok(())
     }
@@ -1895,13 +1878,13 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_apply_type(&mut self, num_types: u32) -> Result<(), Error<'gc>> {
-        let args: Vec<_> = self.pop_stack_args(num_types);
-        let base = self
-            .pop_stack()
-            .as_object()
-            .ok_or_else(|| make_error_1127(self))?;
+        let args = self.stack.pop_slice(num_types as usize);
+        let base = self.pop_stack();
 
-        let applied = base.apply(self, &args)?;
+        let applied = base
+            .as_object()
+            .ok_or_else(|| make_error_1127(&mut self.inner))?
+            .apply(&mut self.inner, args)?;
 
         self.push_stack(applied);
 
@@ -1909,7 +1892,8 @@ impl<'a, 'gc> ActivationWithLocals<'a, 'gc> {
     }
 
     fn op_new_array(&mut self, num_args: u32) -> Result<(), Error<'gc>> {
-        let array = self.pop_stack_args(num_args);
+        let args = self.stack.pop_slice(num_args as usize);
+        let array = ArrayStorage::from_args(args);
         let array_obj = ArrayObject::from_storage(self.context, array);
 
         self.push_stack(array_obj);

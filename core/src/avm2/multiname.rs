@@ -1,4 +1,4 @@
-use crate::avm2::activation::{Activation, ActivationWithLocals};
+use crate::avm2::activation::Activation;
 use crate::avm2::error::{make_error_1032, make_error_1080, make_error_1107};
 use crate::avm2::namespace::Namespace;
 use crate::avm2::script::TranslationUnit;
@@ -297,14 +297,15 @@ impl<'gc> Multiname<'gc> {
 
     pub fn fill_with_runtime_params(
         &self,
-        activation: &mut ActivationWithLocals<'_, 'gc>,
+        activation: &mut Activation<'_, 'gc>,
+        stack: &crate::avm2::stack::StackFrame<'_, 'gc>,
     ) -> Result<Self, Error<'gc>> {
         let name = if self.has_lazy_name() {
-            let name_value = activation.pop_stack();
+            let name_value = stack.pop();
 
             if let Value::Object(Object::QNameObject(qname_object)) = name_value {
                 if self.has_lazy_ns() {
-                    let _ = activation.pop_stack(); // ignore the ns component
+                    let _ = stack.pop(); // ignore the ns component
                 }
                 let mut name = qname_object.name().clone();
 
@@ -321,7 +322,7 @@ impl<'gc> Multiname<'gc> {
         };
 
         let ns = if self.has_lazy_ns() {
-            let ns_value = activation.pop_stack();
+            let ns_value = stack.pop();
             let ns = ns_value.as_namespace()?;
             NamespaceSet::single(ns)
         } else {
