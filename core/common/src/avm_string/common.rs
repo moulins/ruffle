@@ -223,6 +223,7 @@ ruffle_macros::define_common_strings! {
     "number",
     "Number",
     "object",
+    "Object",
     "off",
     "oldStyle",
     "on",
