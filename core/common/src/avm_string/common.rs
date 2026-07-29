@@ -146,6 +146,7 @@ ruffle_macros::define_common_strings! {
     "full",
     "fullScreen",
     "function",
+    "Function",
     "ga",
     "gb",
     "genre",
